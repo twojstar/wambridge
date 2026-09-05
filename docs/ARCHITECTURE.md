@@ -10,7 +10,7 @@ Native TuneIn preset: `radio_cli` → `_play_tunein_safely` → `play_tunein_pre
 
 foobar: foobar output callbacks → `WamOutput` → helper process `wambridge-pcm` → `PcmAudioStreamServer`/FFmpeg → M5; helper stdout reports READY/AUDIO_STARTED/PLAYING and a loopback `ControlChannel` carries volume/pause/stop/sleep back without opening another speaker connection.
 
-Android renderer: DLNA/UPnP control point → `UpnpRenderer` → phone-local stream endpoint → `RendererService` + `SamsungWamChannel` → M5. Android radio replaces the control point with `RadioService` + `RadioProxyServer`.
+Android renderer: DLNA/UPnP control point → `UpnpRenderer` → phone-local stream endpoint → `RendererService` + `SamsungWamChannel` → M5. Android radio replaces the control point with `RadioService` + `RadioProxyServer`. `SpeakerTarget.resolveBound` resolves the speaker together with one concrete Android `Network` + IPv4 target; renderer/radio HTTP listeners, source traffic and WAM control reuse that same target so a Wi-Fi handoff cannot mix an old speaker route with a new local endpoint. Endpoint movement rebuilds the renderer and reconnects radio; temporary loss keeps the requested lifecycle in a waiting/retry state.
 
 ## 3) Layer/Module Responsibilities
 

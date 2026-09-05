@@ -29,8 +29,9 @@ What works:
 
 - SSDP discovery, saved devices resolved by stable device ID, playback control,
   custom radio stations and native TuneIn presets from the CLI.
-- Android adapter with automatic speaker discovery, UPnP renderer, Quick Settings tile and
-  widgets, plus native TuneIn browsing with artwork and speaker-side playback controls.
+- Android adapter with automatic speaker discovery, Wi-Fi handoff recovery, UPnP renderer,
+  Quick Settings tile and widgets, plus native TuneIn browsing with artwork and speaker-side
+  playback controls.
 - foobar2000 2.x x64 output: `f32le → FFmpeg FLAC → local HTTP → speaker`.
 - `Playback → WAM Bridge` with emergency stop, standby and raw volume steps.
 - Configuration through `%LOCALAPPDATA%\WAMBridge\foobar.ini`.

@@ -4,7 +4,7 @@
 Python uses stdlib `unittest` plus `unittest.mock`; Android local tests use JUnit 4. CI runs `uv run python -m unittest discover -s tests -v` and, separately, `./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug`. C++ has no native unit-test runner in the repo; it is compiled in CI and many invariants are pinned by Python source-shape tests.
 
 ## 2) Test Layout
-There are 35 Python `tests/test_*.py` files and 9 Android JVM test files under `mobile/app/src/test/java/...`. Tests are mostly feature-oriented (`test_samsung.py`, `test_pcm_stream.py`, `RendererRoutingTest.kt`). No shared global test setup file is required.
+There are 36 Python `tests/test_*.py` files and 11 Android JVM test files under `mobile/app/src/test/java/...`. Tests are mostly feature-oriented (`test_samsung.py`, `test_pcm_stream.py`, `RendererRoutingTest.kt`). No shared global test setup file is required.
 
 ## 3) Test Scope Matrix
 
@@ -29,3 +29,5 @@ No coverage percentage or threshold is configured. Quality signals are green uni
 - `tests/test_pcm_stream.py`
 - `tests/test_foobar_source.py`
 - `mobile/app/src/test/java/io/github/trvny/wambridge/mobile/RendererRoutingTest.kt`
+- `mobile/app/src/test/java/io/github/trvny/wambridge/mobile/WifiLanEndpointTest.kt` pins Android `Network` + IPv4 endpoint transitions, including same-address handoffs.
+- `mobile/app/src/test/java/io/github/trvny/wambridge/mobile/RadioRecoveryPolicyTest.kt` pins radio ownership during recovery plus retry limits/backoff.
