@@ -651,9 +651,10 @@ operating system records.
       `RadioService` watches for the network going away, so the foreground notification goes
       on claiming playback that stopped minutes ago, and coming back into range recovers
       neither side.~~ **Fixed in PR #146 (2026-09-05).** Android now treats the selected
-      `Network` handle plus IPv4 address as one endpoint identity. Renderer and radio bind
-      discovery, HTTP/proxy traffic and WAM control to that same target; endpoint movement
-      rebuilds the renderer and reconnects radio, while temporary loss leaves the foreground
+      `Network` handle plus IPv4 address as one endpoint identity. Renderer/radio local HTTP
+      listeners and WAM control reuse that same target; the radio's outbound internet-source
+      fetch still selects from the currently available Wi-Fi targets independently. Endpoint
+      movement rebuilds the renderer and reconnects radio, while temporary loss leaves the foreground
       lifecycle waiting and retries when Wi-Fi returns. Radio recovery preserves the requested
       station, pause/mute/target-volume state and playback ownership, uses bounded exponential
       retry once an endpoint exists, and ignores callbacks from retired proxy instances.
