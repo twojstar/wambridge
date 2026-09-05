@@ -139,9 +139,9 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         val preferences = getSharedPreferences(PREFS, MODE_PRIVATE)
         lastStatus = "Finding WAM speaker on Wi-Fi…"
         publish(lastStatus)
-        val target = SpeakerTarget.resolve(applicationContext) { shouldKeepStarting(generation) }
+        val boundTarget = SpeakerTarget.resolveBound(applicationContext) { shouldKeepStarting(generation) }
         if (!shouldKeepStarting(generation)) return
-        if (target == null) {
+        if (boundTarget == null) {
             if (WifiLan.addresses(this).isEmpty()) {
                 lastStatus = "Waiting for Wi-Fi…"
                 publish(lastStatus)
@@ -152,8 +152,11 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
             failCurrentStart(generation, startId)
             return
         }
+        val target = boundTarget.ip
 
-        if (renderer != null && speakerIp == target) {
+        if (renderer != null && speakerIp == target &&
+            renderer!!.wifiTarget.endpoint == boundTarget.wifi.endpoint
+        ) {
             lastStatus = "Ready · ${renderer!!.localAddress.hostAddress}:${renderer!!.port} → $speakerIp · speaker released"
             setPhase(Phase.RUNNING)
             publish(lastStatus)
@@ -174,7 +177,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         var activeRenderer: UpnpRenderer? = null
         try {
             val state = RendererState(rendererUdn)
-            activeRenderer = UpnpRenderer(this, state, this, target)
+            activeRenderer = UpnpRenderer(this, state, this, target, boundTarget.wifi)
             activeRenderer.start()
             if (!shouldKeepStarting(generation)) return
 
@@ -274,7 +277,8 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         wamChannel?.let { return it }
         check(speakerIp.isNotBlank()) { "Speaker is not configured" }
         check(clientUuid.isNotBlank()) { "Client UUID is not configured" }
-        SamsungWamChannel(applicationContext, speakerIp, clientUuid, this).also {
+        val wifi = renderer?.wifiTarget ?: error("Renderer Wi-Fi endpoint is not configured")
+        SamsungWamChannel(applicationContext, speakerIp, clientUuid, this, wifi).also {
             it.connect()
             wamChannel = it
         }

@@ -22,7 +22,10 @@ internal object WifiLan {
         val network: Network,
         val address: Inet4Address,
         val prefixLength: Int,
-    )
+    ) {
+        val endpoint: Endpoint
+            get() = Endpoint(network.networkHandle, address.hostAddress.orEmpty())
+    }
 
     fun targets(context: Context): List<Target> {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -45,9 +48,12 @@ internal object WifiLan {
         return result
     }
 
-    fun endpoints(context: Context): Set<Endpoint> = targets(context).mapNotNull { target ->
-        target.address.hostAddress?.let { Endpoint(target.network.networkHandle, it) }
-    }.toSet()
+    fun preferredTarget(context: Context): Target? = targets(context).firstOrNull()
+
+    fun endpoints(context: Context): Set<Endpoint> = targets(context).mapTo(mutableSetOf()) { it.endpoint }
+
+    fun isCurrentPreferred(context: Context, target: Target): Boolean =
+        preferredTarget(context)?.endpoint == target.endpoint
 
     fun addresses(context: Context): Set<String> = endpoints(context).mapTo(mutableSetOf()) { it.address }
 
@@ -61,27 +67,35 @@ internal object WifiLan {
     fun watch(context: Context, onChanged: () -> Unit): AutoCloseable =
         WifiChangeWatcher(context.applicationContext, onChanged)
 
+    fun connectSocket(target: Target, host: String, port: Int, timeoutMs: Int): Socket {
+        val socket = Socket()
+        try {
+            target.network.bindSocket(socket)
+            socket.connect(InetSocketAddress(host, port), timeoutMs)
+            return socket
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            throw error
+        }
+    }
+
     fun connectSocket(context: Context, host: String, port: Int, timeoutMs: Int): Socket {
         var lastError: Exception? = null
         for (target in targets(context)) {
-            val socket = Socket()
             try {
-                target.network.bindSocket(socket)
-                socket.connect(InetSocketAddress(host, port), timeoutMs)
-                return socket
+                return connectSocket(target, host, port, timeoutMs)
             } catch (error: Exception) {
                 lastError = error
-                runCatching { socket.close() }
             }
         }
         throw lastError ?: IllegalStateException("No active Wi-Fi network")
     }
 
+    fun openHttpConnection(target: Target, url: URL): HttpURLConnection =
+        target.network.openConnection(url) as HttpURLConnection
+
     fun openHttpConnections(context: Context, url: URL): Sequence<HttpURLConnection> = sequence {
-        for (target in targets(context)) {
-            val connection = target.network.openConnection(url) as HttpURLConnection
-            yield(connection)
-        }
+        for (target in targets(context)) yield(openHttpConnection(target, url))
     }
 }
 

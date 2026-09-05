@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Listener {
     private data class StationRequest(val alias: String, val tuneInId: String?)
+    private data class RecoveryControls(val volume: Int, val muted: Boolean, val paused: Boolean)
 
     private val worker = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
@@ -35,6 +36,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     @Volatile private var desiredStation: StationRequest? = null
     private var wifiRecovery = false
     private var wifiRetry: ScheduledFuture<*>? = null
+    private var wifiRecoveryControls: RecoveryControls? = null
 
     @Volatile
     private var destroyed = false
@@ -131,10 +133,11 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         releaseRenderer()
 
         val preferences = getSharedPreferences(RendererService.PREFS, MODE_PRIVATE)
-        speakerIp = SpeakerTarget.resolve(applicationContext) ?: run {
-            fail("No WAM speaker found on Wi-Fi.")
+        val boundTarget = SpeakerTarget.resolveBound(applicationContext) ?: run {
+            fail("No WAM speaker found on the active Wi-Fi endpoint.")
             return
         }
+        speakerIp = boundTarget.ip
 
         val selected = radioStationToPlay(alias, tuneInId, RadioStationStore(this).all())
         if (selected == null) {
@@ -163,8 +166,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         var activeProxy: RadioProxyServer? = null
         var activeChannel: SamsungWamChannel? = null
         try {
-            activeProxy = RadioProxyServer(this, speakerIp, sources, this).also { it.start() }
-            activeChannel = SamsungWamChannel(this, speakerIp, clientUuid, this).also { it.connect() }
+            activeProxy = RadioProxyServer(this, speakerIp, sources, this, boundTarget.wifi).also { it.start() }
+            activeChannel = SamsungWamChannel(this, speakerIp, clientUuid, this, boundTarget.wifi).also { it.connect() }
             volumeChannel = activeChannel
 
             // Same startup rule as renderer and desktop radio: keep old firmware
@@ -172,9 +175,11 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             // to step 3 only after the M5 has actually requested audio.
             activeChannel.setVolumeRaw(0)
             activeChannel.setMute(true)
+            val recoveryControls = wifiRecoveryControls
             safeVolumeApplied = false
-            targetVolume = SAFE_START_VOLUME
-            muted = false
+            targetVolume = recoveryControls?.volume ?: SAFE_START_VOLUME
+            muted = recoveryControls?.muted ?: false
+            paused = recoveryControls?.paused ?: false
             activeChannel.offerStream(activeProxy.url)
 
             station = selected
@@ -184,8 +189,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             activeProxy = null
             activeChannel = null
             // Start state belongs to the command, not to delayed speaker/proxy callbacks.
-            // A late StartPlaybackEvent or stream-open signal must not undo a user pause.
-            paused = false
+            // Recovery keeps pause/mute/volume; an explicit play starts from clean defaults.
             running = true
             cancelWifiRecovery()
             lastStatus = "Starting ${selected.alias}…"
@@ -240,6 +244,9 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             station?.let { desiredStation = StationRequest(it.alias, it.tuneInId) }
         }
         if (desiredStation == null) return
+        if (wifiRecoveryControls == null) {
+            wifiRecoveryControls = RecoveryControls(targetVolume, muted, paused)
+        }
         wifiRecovery = true
         starting = true
         stopRadio(removeForeground = false, clearDesired = false)
@@ -279,6 +286,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         wifiRetry?.cancel(false)
         wifiRetry = null
         wifiRecovery = false
+        wifiRecoveryControls = null
         starting = false
     }
 
@@ -288,8 +296,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         return WifiLan.endpointChange(bound, WifiLan.endpoints(this)) != WifiLan.EndpointChange.STABLE
     }
 
-    override fun onStreamOpened(sourceUrl: String) = execute {
-        if (destroyed || !running) return@execute
+    override fun onStreamOpened(source: Any, sourceUrl: String) = execute {
+        if (destroyed || !running || source !== proxy) return@execute
         val alias = station?.alias ?: "radio"
         if (!safeVolumeApplied) {
             val activeChannel = channel ?: return@execute
@@ -305,8 +313,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         publish(lastStatus)
     }
 
-    override fun onStreamClosed() = execute {
-        if (destroyed || !running) return@execute
+    override fun onStreamClosed(source: Any) = execute {
+        if (destroyed || !running || source !== proxy) return@execute
         if (shouldRecoverFromWifiChange()) {
             beginWifiRecovery("Wi-Fi changed · reconnecting radio…")
             return@execute
@@ -317,8 +325,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         stopSelf()
     }
 
-    override fun onProxyError(message: String) = execute {
-        if (destroyed || !running) return@execute
+    override fun onProxyError(source: Any, message: String) = execute {
+        if (destroyed || !running || source !== proxy) return@execute
         if (shouldRecoverFromWifiChange()) {
             beginWifiRecovery("Wi-Fi changed · reconnecting radio…")
             return@execute

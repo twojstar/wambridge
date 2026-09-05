@@ -5,9 +5,13 @@ import android.content.Context
 internal object SpeakerTarget {
     private const val KEY_SPEAKER_DEVICE_ID = "speaker_device_id"
     private const val IDENTITY_TIMEOUT_MS = 1_500
+    private const val BOUND_RESOLVE_ATTEMPTS = 3
     private val resolutionLock = Any()
 
     data class Resolution(val ip: String, val deviceId: String?)
+    data class BoundResolution(val resolution: Resolution, val wifi: WifiLan.Target) {
+        val ip: String get() = resolution.ip
+    }
 
     fun resolve(
         context: Context,
@@ -18,6 +22,41 @@ internal object SpeakerTarget {
         if (!shouldContinue()) return@withDiscoveryLock null
         rememberResolved(context.applicationContext, result)
         result.ip
+    }
+
+    fun resolveBound(
+        context: Context,
+        verifySaved: Boolean = true,
+        shouldContinue: () -> Boolean = { true },
+    ): BoundResolution? = withDiscoveryLock {
+        repeat(BOUND_RESOLVE_ATTEMPTS) {
+            if (!shouldContinue()) return@withDiscoveryLock null
+            val wifi = WifiLan.preferredTarget(context) ?: return@withDiscoveryLock null
+            val result = resolveLocked(context, verifySaved, shouldContinue)
+            if (!shouldContinue()) return@withDiscoveryLock null
+            if (!WifiLan.isCurrentPreferred(context, wifi)) return@repeat
+            if (result == null) return@withDiscoveryLock null
+
+            val currentId = runCatching {
+                SamsungWamChannel.readDeviceId(
+                    context,
+                    result.ip,
+                    IDENTITY_TIMEOUT_MS,
+                    wifi,
+                )
+            }.getOrNull()
+            if (!WifiLan.isCurrentPreferred(context, wifi)) return@repeat
+            val verified = if (result.deviceId != null) {
+                currentId == result.deviceId
+            } else {
+                currentId != null || SamsungWamChannel.probe(context, result.ip, IDENTITY_TIMEOUT_MS, wifi)
+            }
+            if (!verified) return@withDiscoveryLock null
+            val stable = Resolution(result.ip, currentId ?: result.deviceId)
+            rememberResolved(context, stable)
+            return@withDiscoveryLock BoundResolution(stable, wifi)
+        }
+        null
     }
 
     fun resolveUnpersisted(
