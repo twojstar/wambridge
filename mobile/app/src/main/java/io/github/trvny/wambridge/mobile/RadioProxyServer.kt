@@ -82,8 +82,6 @@ internal class RadioProxyServer(
                         handleClient(client)
                     } catch (error: IOException) {
                         reportClientError(client, error)
-                    } catch (error: IllegalArgumentException) {
-                        reportClientError(client, error)
                     } finally {
                         synchronized(clientLock) { clients -= client }
                         runCatching { client.close() }

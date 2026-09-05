@@ -203,8 +203,18 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
             publish(lastStatus)
         } catch (error: Exception) {
             if (shouldKeepStarting(generation)) {
-                lastStatus = "Could not start adapter: ${error.message ?: error.javaClass.simpleName}"
-                failCurrentStart(generation, startId)
+                if (!WifiLan.isCurrentPreferred(applicationContext, boundTarget.wifi)) {
+                    if (WifiLan.endpoints(this).isEmpty()) {
+                        waitForWifi()
+                    } else {
+                        lastStatus = "Wi-Fi changed · rebuilding renderer…"
+                        setPhase(Phase.STARTING)
+                        publish(lastStatus)
+                    }
+                } else {
+                    lastStatus = "Could not start adapter: ${error.message ?: error.javaClass.simpleName}"
+                    failCurrentStart(generation, startId)
+                }
             }
         } finally {
             try {

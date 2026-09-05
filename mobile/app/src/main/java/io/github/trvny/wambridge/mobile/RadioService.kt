@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Listener {
     private data class StationRequest(val alias: String, val tuneInId: String?)
     private data class RecoveryControls(val volume: Int, val muted: Boolean, val paused: Boolean)
+    private data class PreparedStation(val station: MobileRadioStation, val sources: List<String>)
 
     private val worker = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
@@ -153,29 +154,14 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         }
         speakerIp = boundTarget.ip
 
-        val selected = radioStationToPlay(alias, tuneInId, RadioStationStore(this).all())
-        if (selected == null) {
-            fail("Radio station '$alias' is no longer saved.")
-            return
-        }
+        val prepared = prepareStation(alias, tuneInId) ?: return
+        val selected = prepared.station
+        val sources = prepared.sources
 
         val clientUuid = preferences.getString(KEY_CLIENT_UUID, null)
             ?: SamsungWamChannel.newClientUuid().also {
                 preferences.edit().putString(KEY_CLIENT_UUID, it).apply()
             }
-
-        // Already on the radio worker thread, so this blocking resolution never
-        // touches the main one. A saved TuneIn id is resolved now rather than
-        // stored, because the answer changes whenever the broadcaster moves its
-        // endpoint - the failure a hardcoded URL cannot survive. Failure here is
-        // not fatal: the saved URLs come back unchanged.
-        val sources = TuneInResolver.candidateUrls(this, selected)
-        // A catalogue station carries no saved URLs, so an unresolvable TuneIn id
-        // leaves nothing to relay. Saying so beats handing the proxy an empty list.
-        if (sources.isEmpty()) {
-            fail("TuneIn has no directly playable stream for ${selected.alias}.")
-            return
-        }
 
         var activeProxy: RadioProxyServer? = null
         var activeChannel: SamsungWamChannel? = null
@@ -224,6 +210,23 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
                 retryable = wifiRecovery,
             )
         }
+    }
+
+    private fun prepareStation(alias: String, tuneInId: String?): PreparedStation? {
+        val selected = radioStationToPlay(alias, tuneInId, RadioStationStore(this).all()) ?: run {
+            fail("Radio station '$alias' is no longer saved.")
+            return null
+        }
+        val sources = TuneInResolver.candidateUrls(this, selected)
+        if (sources.isEmpty()) {
+            val catalogueOnly = selected.urls.isEmpty() && selected.tuneInId != null
+            fail(
+                "TuneIn has no directly playable stream for ${selected.alias}.",
+                retryable = wifiRecovery && catalogueOnly,
+            )
+            return null
+        }
+        return PreparedStation(selected, sources)
     }
 
     private fun releaseRenderer() {
