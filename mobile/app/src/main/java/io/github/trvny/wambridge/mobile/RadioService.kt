@@ -147,21 +147,14 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         stopRadio(removeForeground = false, clearDesired = false)
         releaseRenderer()
 
-        val preferences = getSharedPreferences(RendererService.PREFS, MODE_PRIVATE)
-        val boundTarget = SpeakerTarget.resolveBound(applicationContext) ?: run {
-            fail("No WAM speaker found on the active Wi-Fi endpoint.", retryable = wifiRecovery)
-            return
-        }
+        val boundTarget = resolveRadioTarget() ?: return
         speakerIp = boundTarget.ip
 
         val prepared = prepareStation(alias, tuneInId) ?: return
         val selected = prepared.station
         val sources = prepared.sources
 
-        val clientUuid = preferences.getString(KEY_CLIENT_UUID, null)
-            ?: SamsungWamChannel.newClientUuid().also {
-                preferences.edit().putString(KEY_CLIENT_UUID, it).apply()
-            }
+        val clientUuid = radioClientUuid()
 
         var activeProxy: RadioProxyServer? = null
         var activeChannel: SamsungWamChannel? = null
@@ -210,6 +203,22 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
                 retryable = wifiRecovery,
             )
         }
+    }
+
+    private fun resolveRadioTarget(): SpeakerTarget.BoundResolution? {
+        val target = SpeakerTarget.resolveBound(applicationContext)
+        if (target == null) {
+            fail("No WAM speaker found on the active Wi-Fi endpoint.", retryable = wifiRecovery)
+        }
+        return target
+    }
+
+    private fun radioClientUuid(): String {
+        val preferences = getSharedPreferences(RendererService.PREFS, MODE_PRIVATE)
+        return preferences.getString(KEY_CLIENT_UUID, null)
+            ?: SamsungWamChannel.newClientUuid().also {
+                preferences.edit().putString(KEY_CLIENT_UUID, it).apply()
+            }
     }
 
     private fun prepareStation(alias: String, tuneInId: String?): PreparedStation? {
