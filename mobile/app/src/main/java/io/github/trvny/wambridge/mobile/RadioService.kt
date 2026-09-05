@@ -241,7 +241,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private fun releaseRendererForRadioStart(): Boolean = try {
         releaseRenderer()
         true
-    } catch (error: Exception) {
+    } catch (error: IllegalStateException) {
         fail(
             "Could not release renderer: ${error.message ?: error.javaClass.simpleName}",
             retryable = wifiRecovery,
