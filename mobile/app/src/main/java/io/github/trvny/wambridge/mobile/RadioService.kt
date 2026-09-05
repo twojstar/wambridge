@@ -145,7 +145,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private fun startStation(alias: String, tuneInId: String? = null) {
         if (destroyed) return
         stopRadio(removeForeground = false, clearDesired = false)
-        releaseRenderer()
+        if (!releaseRendererForRadioStart()) return
 
         val boundTarget = resolveRadioTarget() ?: return
         speakerIp = boundTarget.ip
@@ -236,6 +236,17 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             return null
         }
         return PreparedStation(selected, sources)
+    }
+
+    private fun releaseRendererForRadioStart(): Boolean = try {
+        releaseRenderer()
+        true
+    } catch (error: Exception) {
+        fail(
+            "Could not release renderer: ${error.message ?: error.javaClass.simpleName}",
+            retryable = wifiRecovery,
+        )
+        false
     }
 
     private fun releaseRenderer() {
