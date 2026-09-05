@@ -16,6 +16,10 @@ The Android adapter provides:
 - WAM speaker autodiscovery via SSDP with prefix-aware LAN fallback; starting the renderer
   from the app, Quick Settings tile or widget resolves the saved target and discovers it
   automatically when needed;
+- endpoint-aware Wi-Fi recovery: discovery, WAM control and the local renderer/radio proxy are
+  bound to the same Android `Network` + IPv4 target; a changed network identity triggers a
+  rebuild/reconnect even when DHCP reuses the same address, while temporary Wi-Fi loss waits
+  and retries instead of silently abandoning the requested session;
 - UPnP MediaRenderer services: AVTransport, RenderingControl and ConnectionManager;
 - a local WAV/LPCM, MP3 and FLAC proxy handed to the M5 through `SetUrlPlayback`;
 - safe first-start volume capped at M5 raw step `3`;

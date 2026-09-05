@@ -647,11 +647,26 @@ operating system records.
         across processes, out of proportion to a scenario that needs two speakers
         crashing close together, on a project with one physical M5 to test either
         half of it against.
-    - *The phone walked out of Wi-Fi.* Same end state, plus a second wrong one: nothing in
+    - ~~*The phone walked out of Wi-Fi.* Same end state, plus a second wrong one: nothing in
       `RadioService` watches for the network going away, so the foreground notification goes
       on claiming playback that stopped minutes ago, and coming back into range recovers
-      neither side. The service should notice and say so - and, once back, either resume or
-      release the speaker rather than leaving both halves lying.
+      neither side.~~ **Fixed in PR #146 (2026-09-05).** Android now treats the selected
+      `Network` handle plus IPv4 address as one endpoint identity. Renderer/radio local HTTP
+      listeners and WAM control reuse that same target; the radio's outbound internet-source
+      fetch still selects from the currently available Wi-Fi targets independently. Endpoint
+      movement rebuilds the renderer and reconnects radio, while temporary loss leaves the foreground
+      lifecycle waiting and retries when Wi-Fi returns. Radio recovery preserves the requested
+      station, pause/mute/target-volume state and playback ownership, uses bounded exponential
+      retry once an endpoint exists, and ignores callbacks from retired proxy instances.
+
+      The implementation is deliberately SSID/frequency agnostic: a 2.4 → 5 GHz move matters
+      when Android presents a new `Network`/IPv4 endpoint, not because the app parses a band
+      name. JVM coverage pins endpoint classification and radio recovery ownership/backoff.
+      Physical Xiaomi + M5 testing also caught and fixed a real `RadioProxyServer` crash caused
+      by the local reachability preflight connecting and closing before HTTP headers. A complete
+      post-handoff playback observation was not obtained in that session because wireless ADB
+      disappeared after the phone switched networks, so do not turn that run into a stronger
+      hardware claim than it was.
     - *The playback path wedged.* Measured 2026-08-28: after a `SetUrlPlayback` aimed at a
       URL the speaker cannot pull, `SetUrlPlayback` and `SetStopPlayback` stop answering
       entirely - the full timeout, no reply - while `GetFunc`, `GetVolume` and `SetVolume`
