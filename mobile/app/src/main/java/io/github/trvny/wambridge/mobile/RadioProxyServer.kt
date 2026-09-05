@@ -23,11 +23,12 @@ internal class RadioProxyServer(
     // carries an id, the saved URLs behind it as the static fallbacks.
     private val sources: List<String>,
     private val listener: Listener,
+    private val wifiTarget: WifiLan.Target,
 ) : AutoCloseable {
     interface Listener {
-        fun onStreamOpened(sourceUrl: String)
-        fun onStreamClosed()
-        fun onProxyError(message: String)
+        fun onStreamOpened(source: Any, sourceUrl: String)
+        fun onStreamClosed(source: Any)
+        fun onProxyError(source: Any, message: String)
     }
 
     private data class OpenSource(
@@ -45,6 +46,8 @@ internal class RadioProxyServer(
 
     lateinit var localAddress: Inet4Address
         private set
+    var networkHandle: Long = 0
+        private set
     var port: Int = 0
         private set
 
@@ -54,8 +57,8 @@ internal class RadioProxyServer(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            localAddress = WifiLan.targets(appContext).firstOrNull()?.address
-                ?: error("No active Wi-Fi IPv4 address found")
+            localAddress = wifiTarget.address
+            networkHandle = wifiTarget.network.networkHandle
             val socket = ServerSocket(0, 8, localAddress)
             server = socket
             port = socket.localPort
@@ -77,15 +80,22 @@ internal class RadioProxyServer(
                 executor.execute {
                     try {
                         handleClient(client)
+                    } catch (error: IOException) {
+                        reportClientError(client, error)
                     } finally {
                         synchronized(clientLock) { clients -= client }
                         runCatching { client.close() }
                     }
                 }
             } catch (_: IOException) {
-                if (running.get()) listener.onProxyError("Radio proxy listener stopped")
+                if (running.get()) listener.onProxyError(this, "Radio proxy listener stopped")
             }
         }
+    }
+
+    private fun reportClientError(client: Socket, error: Exception) {
+        if (!running.get() || client.inetAddress.hostAddress != speakerIp) return
+        listener.onProxyError(this, error.message ?: error.javaClass.simpleName)
     }
 
     private fun handleClient(client: Socket) {
@@ -109,23 +119,23 @@ internal class RadioProxyServer(
             }
 
             writeSuccess(output, opened.contentType)
-            listener.onStreamOpened(source)
+            listener.onStreamOpened(this, source)
             try {
                 opened.connection.inputStream.use { raw ->
                     BufferedInputStream(raw, COPY_BUFFER).copyTo(output, COPY_BUFFER)
                     output.flush()
                 }
             } catch (error: Exception) {
-                listener.onProxyError(error.message ?: error.javaClass.simpleName)
+                listener.onProxyError(this, error.message ?: error.javaClass.simpleName)
             } finally {
                 opened.connection.disconnect()
-                listener.onStreamClosed()
+                listener.onStreamClosed(this)
             }
             return
         }
 
         val message = lastError?.message ?: "No usable station URL"
-        listener.onProxyError(message)
+        listener.onProxyError(this, message)
         runCatching { writeError(output, 502, "Bad Gateway") }
     }
 

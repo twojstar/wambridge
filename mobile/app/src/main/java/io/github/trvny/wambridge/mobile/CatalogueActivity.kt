@@ -322,7 +322,7 @@ class CatalogueActivity : Activity() {
         releaseOwner("Renderer", { RendererService.busy }) {
             Intent(this, RendererService::class.java).apply { action = RendererService.ACTION_STOP }
         }
-        releaseOwner("Radio", { RadioService.running }) {
+        releaseOwner("Radio", { RadioService.active }) {
             Intent(this, RadioService::class.java).apply { action = RadioService.ACTION_STOP }
         }
     }

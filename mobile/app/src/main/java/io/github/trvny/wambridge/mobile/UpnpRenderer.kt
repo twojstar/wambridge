@@ -53,6 +53,7 @@ internal class UpnpRenderer(
     private val state: RendererState,
     private val callbacks: RendererCallbacks,
     private val speakerIp: String,
+    val wifiTarget: WifiLan.Target,
 ) : AutoCloseable {
     private val executor = Executors.newCachedThreadPool()
     private val running = AtomicBoolean(false)
@@ -66,6 +67,8 @@ internal class UpnpRenderer(
 
     lateinit var localAddress: Inet4Address
         private set
+    var networkHandle: Long = 0
+        private set
     var port: Int = 0
         private set
 
@@ -75,8 +78,8 @@ internal class UpnpRenderer(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            localAddress = WifiLan.targets(context).firstOrNull()?.address
-                ?: error("No active Wi-Fi IPv4 address found")
+            localAddress = wifiTarget.address
+            networkHandle = wifiTarget.network.networkHandle
             startHttp()
             startSsdp()
         } catch (error: Exception) {

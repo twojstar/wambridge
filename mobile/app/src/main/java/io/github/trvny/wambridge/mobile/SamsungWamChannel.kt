@@ -70,6 +70,7 @@ internal class SamsungWamChannel(
     private val speakerIp: String,
     private val clientUuid: String,
     private val listener: Listener? = null,
+    private val wifiTarget: WifiLan.Target? = null,
 ) : AutoCloseable {
     interface Listener {
         fun onPlaybackStarted()
@@ -90,12 +91,9 @@ internal class SamsungWamChannel(
         synchronized(sendLock) {
             if (socket?.isConnected == true && socket?.isClosed == false) return
 
-            val connection = WifiLan.connectSocket(
-                appContext,
-                speakerIp,
-                PORT,
-                CONNECT_TIMEOUT_MS,
-            ).apply {
+            val connection = (wifiTarget?.let {
+                WifiLan.connectSocket(it, speakerIp, PORT, CONNECT_TIMEOUT_MS)
+            } ?: WifiLan.connectSocket(appContext, speakerIp, PORT, CONNECT_TIMEOUT_MS)).apply {
                 keepAlive = true
                 soTimeout = READ_TIMEOUT_MS
             }
@@ -391,6 +389,16 @@ internal class SamsungWamChannel(
 
         fun newClientUuid(): String = UUID.randomUUID().toString()
 
+        private fun httpConnections(
+            context: Context,
+            url: URL,
+            wifiTarget: WifiLan.Target?,
+        ): Sequence<HttpURLConnection> = if (wifiTarget == null) {
+            WifiLan.openHttpConnections(context.applicationContext, url)
+        } else {
+            sequenceOf(WifiLan.openHttpConnection(wifiTarget, url))
+        }
+
         /**
          * Read the selected source back with `GetFunc`. Commands sent over the
          * persistent channel are never acknowledged to the caller, so a refused
@@ -430,11 +438,12 @@ internal class SamsungWamChannel(
             context: Context,
             speakerIp: String,
             timeoutMs: Int = CONNECT_TIMEOUT_MS,
+            wifiTarget: WifiLan.Target? = null,
         ): String {
             val command = Uri.encode("<name>GetDeviceId</name>")
             val url = URL("http://$speakerIp:$PORT/CPM?cmd=$command")
             var lastError: Exception? = null
-            for (connection in WifiLan.openHttpConnections(context.applicationContext, url)) {
+            for (connection in httpConnections(context, url, wifiTarget)) {
                 connection.apply {
                     connectTimeout = timeoutMs
                     readTimeout = timeoutMs
@@ -494,10 +503,11 @@ internal class SamsungWamChannel(
             context: Context,
             speakerIp: String,
             timeoutMs: Int = CONNECT_TIMEOUT_MS,
+            wifiTarget: WifiLan.Target? = null,
         ): Boolean {
             val command = Uri.encode("<name>GetSpkName</name>")
             val url = URL("http://$speakerIp:$PORT/UIC?cmd=$command")
-            for (connection in WifiLan.openHttpConnections(context.applicationContext, url)) {
+            for (connection in httpConnections(context, url, wifiTarget)) {
                 connection.apply {
                     connectTimeout = timeoutMs
                     readTimeout = timeoutMs
