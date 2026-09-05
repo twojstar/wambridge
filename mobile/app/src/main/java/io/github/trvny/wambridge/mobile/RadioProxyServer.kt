@@ -80,6 +80,10 @@ internal class RadioProxyServer(
                 executor.execute {
                     try {
                         handleClient(client)
+                    } catch (error: IOException) {
+                        reportClientError(client, error)
+                    } catch (error: IllegalArgumentException) {
+                        reportClientError(client, error)
                     } finally {
                         synchronized(clientLock) { clients -= client }
                         runCatching { client.close() }
@@ -89,6 +93,11 @@ internal class RadioProxyServer(
                 if (running.get()) listener.onProxyError(this, "Radio proxy listener stopped")
             }
         }
+    }
+
+    private fun reportClientError(client: Socket, error: Exception) {
+        if (!running.get() || client.inetAddress.hostAddress != speakerIp) return
+        listener.onProxyError(this, error.message ?: error.javaClass.simpleName)
     }
 
     private fun handleClient(client: Socket) {
