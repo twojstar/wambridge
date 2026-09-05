@@ -15,6 +15,9 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+internal fun radioOwnerActive(starting: Boolean, running: Boolean, recovering: Boolean): Boolean =
+    starting || running || recovering
+
 class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Listener {
     private data class StationRequest(val alias: String, val tuneInId: String?)
     private data class RecoveryControls(val volume: Int, val muted: Boolean, val paused: Boolean)
@@ -36,7 +39,6 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private var wifiWatcher: AutoCloseable? = null
     private var wifiFallback: ScheduledFuture<*>? = null
     @Volatile private var desiredStation: StationRequest? = null
-    @Volatile private var wifiRecovery = false
     private var wifiRetry: ScheduledFuture<*>? = null
     private var wifiRetryAttempt = 0
     private var wifiRecoveryControls: RecoveryControls? = null
@@ -126,7 +128,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     override fun onDestroy() {
         destroyed = true
         startPending.set(false)
-        starting = false
+        cancelWifiRecovery()
         runCatching { wifiWatcher?.close() }
         wifiWatcher = null
         wifiFallback?.cancel(false)
@@ -323,15 +325,11 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private fun scheduleWifiRetry(waitingForNetwork: Boolean = false) {
         wifiRetry?.cancel(false)
         if (!wifiRecovery || destroyed) return
-        if (!waitingForNetwork && wifiRetryAttempt >= MAX_WIFI_RETRY_ATTEMPTS) {
+        if (!canRetryWifi(wifiRetryAttempt, waitingForNetwork)) {
             abortWifiRecovery("Wi-Fi reconnect gave up after repeated failures.")
             return
         }
-        val delayMs = if (waitingForNetwork) {
-            WIFI_OFFLINE_POLL_MS
-        } else {
-            (WIFI_RETRY_BASE_MS shl wifiRetryAttempt.coerceAtMost(4)).coerceAtMost(WIFI_RETRY_MAX_MS)
-        }
+        val delayMs = wifiRetryDelayMs(wifiRetryAttempt, waitingForNetwork)
         if (!waitingForNetwork) wifiRetryAttempt += 1
         wifiRetry = worker.schedule({
             if (!destroyed && wifiRecovery) attemptWifiRecovery()
@@ -616,14 +614,25 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         private const val MAX_WIFI_RETRY_ATTEMPTS = 6
         private const val WIFI_RECONNECTING = "Wi-Fi changed · reconnecting radio…"
         private const val WIFI_WAITING = "Wi-Fi unavailable · waiting…"
+        internal fun canRetryWifi(attempt: Int, waitingForNetwork: Boolean): Boolean =
+            waitingForNetwork || attempt < MAX_WIFI_RETRY_ATTEMPTS
+
+        internal fun wifiRetryDelayMs(attempt: Int, waitingForNetwork: Boolean): Long =
+            if (waitingForNetwork) {
+                WIFI_OFFLINE_POLL_MS
+            } else {
+                (WIFI_RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(WIFI_RETRY_MAX_MS)
+            }
+
         private const val WORKER_THREAD_NAME = "wam-mobile-radio"
 
         @Volatile var starting = false
             private set
         @Volatile var running = false
             private set
+        @Volatile private var wifiRecovery = false
         val active: Boolean
-            get() = starting || running
+            get() = radioOwnerActive(starting, running, wifiRecovery)
         @Volatile var paused = false
             private set
         @Volatile var lastStatus = "Stopped"
