@@ -34,6 +34,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
     private val idleLock = Any()
     private var idleRelease: ScheduledFuture<*>? = null
     private var wifiWatcher: AutoCloseable? = null
+    private var wifiFallback: ScheduledFuture<*>? = null
     private val startPending = AtomicBoolean(false)
     private val desiredRunning = AtomicBoolean(false)
     private val commandGeneration = AtomicInteger(0)
@@ -51,7 +52,13 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrNull()
+        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrElse { error ->
+            Log.w(TAG, "Wi-Fi callback unavailable; using polling fallback", error)
+            wifiFallback = idleScheduler.scheduleWithFixedDelay(
+                { onWifiChanged() }, WIFI_FALLBACK_SECONDS, WIFI_FALLBACK_SECONDS, TimeUnit.SECONDS,
+            )
+            null
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -97,6 +104,8 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         cancelIdleRelease()
         runCatching { wifiWatcher?.close() }
         wifiWatcher = null
+        wifiFallback?.cancel(false)
+        wifiFallback = null
 
         try {
             worker.submit { stopRenderer() }.get(DESTROY_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -154,10 +163,11 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         }
         val target = boundTarget.ip
 
-        if (renderer != null && speakerIp == target &&
-            renderer!!.wifiTarget.endpoint == boundTarget.wifi.endpoint
+        val currentRenderer = renderer
+        if (currentRenderer != null && speakerIp == target &&
+            currentRenderer.wifiTarget.endpoint == boundTarget.wifi.endpoint
         ) {
-            lastStatus = "Ready · ${renderer!!.localAddress.hostAddress}:${renderer!!.port} → $speakerIp · speaker released"
+            lastStatus = "Ready · ${currentRenderer.localAddress.hostAddress}:${currentRenderer.port} → $speakerIp · speaker released"
             setPhase(Phase.RUNNING)
             publish(lastStatus)
             return
@@ -181,13 +191,14 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
             activeRenderer.start()
             if (!shouldKeepStarting(generation)) return
 
+            val startedRenderer = activeRenderer ?: error("Renderer did not start")
             rendererState = state
-            renderer = activeRenderer
+            renderer = startedRenderer
             activeRenderer = null
 
             ownsPlayback = false
             safeVolumeApplied = false
-            lastStatus = "Ready · ${renderer!!.localAddress.hostAddress}:${renderer!!.port} → $speakerIp · speaker released"
+            lastStatus = "Ready · ${startedRenderer.localAddress.hostAddress}:${startedRenderer.port} → $speakerIp · speaker released"
             setPhase(Phase.RUNNING)
             publish(lastStatus)
         } catch (error: Exception) {
@@ -260,17 +271,17 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
     }
 
     private fun releaseRadio() {
-        if (!RadioService.running) return
+        if (!RadioService.active) return
         startService(
             Intent(this, RadioService::class.java).apply {
                 action = RadioService.ACTION_STOP
             },
         )
         val deadline = SystemClock.elapsedRealtime() + RADIO_STOP_TIMEOUT_MS
-        while (RadioService.running && SystemClock.elapsedRealtime() < deadline) {
+        while (RadioService.active && SystemClock.elapsedRealtime() < deadline) {
             Thread.sleep(50)
         }
-        check(!RadioService.running) { "Radio did not release the WAM control channel" }
+        check(!RadioService.active) { "Radio did not release the WAM control channel" }
     }
 
     private fun ensureChannel(): SamsungWamChannel = synchronized(channelLock) {
@@ -593,6 +604,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         private const val RADIO_STOP_TIMEOUT_MS = 2_500L
         private const val CONTROL_ACTION_TIMEOUT_MS = 5_000L
         private const val WORKER_THREAD_NAME = "wam-mobile-service"
+        private const val WIFI_FALLBACK_SECONDS = 5L
         private const val TAG = "WamBridgeRenderer"
 
         @Volatile var phase: Phase = Phase.STOPPED

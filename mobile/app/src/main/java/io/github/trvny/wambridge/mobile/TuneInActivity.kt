@@ -508,17 +508,17 @@ class TuneInActivity : Activity() {
     }
 
     private fun releaseRadio() {
-        if (!RadioService.running) return
+        if (!RadioService.active) return
         startService(
             Intent(this, RadioService::class.java).apply {
                 action = RadioService.ACTION_STOP
             },
         )
         val deadline = SystemClock.elapsedRealtime() + OWNER_STOP_TIMEOUT_MS
-        while (RadioService.running && SystemClock.elapsedRealtime() < deadline) {
+        while (RadioService.active && SystemClock.elapsedRealtime() < deadline) {
             Thread.sleep(50)
         }
-        check(!RadioService.running) { "Radio did not release the WAM control channel" }
+        check(!RadioService.active) { "Radio did not release the WAM control channel" }
     }
 
     companion object {

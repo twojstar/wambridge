@@ -33,9 +33,11 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private var muted = false
     private var speakerIp = ""
     private var wifiWatcher: AutoCloseable? = null
+    private var wifiFallback: ScheduledFuture<*>? = null
     @Volatile private var desiredStation: StationRequest? = null
-    private var wifiRecovery = false
+    @Volatile private var wifiRecovery = false
     private var wifiRetry: ScheduledFuture<*>? = null
+    private var wifiRetryAttempt = 0
     private var wifiRecoveryControls: RecoveryControls? = null
 
     @Volatile
@@ -44,7 +46,15 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrNull()
+        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrElse {
+            wifiFallback = worker.scheduleWithFixedDelay(
+                { if (!destroyed) reconcileWifiEndpoint() },
+                WIFI_FALLBACK_MS,
+                WIFI_FALLBACK_MS,
+                TimeUnit.MILLISECONDS,
+            )
+            null
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,7 +100,9 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
                     return START_NOT_STICKY
                 }
                 if (startPending.compareAndSet(false, true)) {
+                    cancelWifiRecovery()
                     desiredStation = StationRequest(alias, tuneInId)
+                    wifiRecoveryControls = null
                     starting = true
                     WamBridgeWidget.updateAll(applicationContext)
                     execute {
@@ -116,6 +128,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         starting = false
         runCatching { wifiWatcher?.close() }
         wifiWatcher = null
+        wifiFallback?.cancel(false)
+        wifiFallback = null
         try {
             worker.submit { stopRadio() }.get(TEARDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: Exception) {
@@ -134,7 +148,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
 
         val preferences = getSharedPreferences(RendererService.PREFS, MODE_PRIVATE)
         val boundTarget = SpeakerTarget.resolveBound(applicationContext) ?: run {
-            fail("No WAM speaker found on the active Wi-Fi endpoint.")
+            fail("No WAM speaker found on the active Wi-Fi endpoint.", retryable = wifiRecovery)
             return
         }
         speakerIp = boundTarget.ip
@@ -183,7 +197,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             activeChannel.offerStream(activeProxy.url)
 
             station = selected
-            desiredStation = StationRequest(selected.alias, selected.tuneInId)
+            desiredStation = requestForStation(selected)
             proxy = activeProxy
             channel = activeChannel
             activeProxy = null
@@ -200,7 +214,15 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             runCatching { activeChannel?.setMute(true) }
             runCatching { activeChannel?.close() }
             runCatching { activeProxy?.close() }
-            fail("Could not start ${selected.alias}: ${error.message ?: error.javaClass.simpleName}")
+            if (!WifiLan.isCurrentPreferred(applicationContext, boundTarget.wifi)) {
+                desiredStation = requestForStation(selected)
+                beginWifiRecovery(WIFI_RECONNECTING)
+                return
+            }
+            fail(
+                "Could not start ${selected.alias}: ${error.message ?: error.javaClass.simpleName}",
+                retryable = wifiRecovery,
+            )
         }
     }
 
@@ -234,32 +256,33 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             WifiLan.EndpointChange.STABLE,
             WifiLan.EndpointChange.UNBOUND,
             -> return
-            WifiLan.EndpointChange.LOST -> beginWifiRecovery("Wi-Fi unavailable · waiting…")
-            WifiLan.EndpointChange.MOVED -> beginWifiRecovery("Wi-Fi changed · reconnecting radio…")
+            WifiLan.EndpointChange.LOST -> beginWifiRecovery(WIFI_WAITING)
+            WifiLan.EndpointChange.MOVED -> beginWifiRecovery(WIFI_RECONNECTING)
         }
     }
 
     private fun beginWifiRecovery(message: String) {
         if (desiredStation == null) {
-            station?.let { desiredStation = StationRequest(it.alias, it.tuneInId) }
+            station?.let { desiredStation = requestForStation(it) }
         }
         if (desiredStation == null) return
         if (wifiRecoveryControls == null) {
             wifiRecoveryControls = RecoveryControls(targetVolume, muted, paused)
         }
+        if (!wifiRecovery) wifiRetryAttempt = 0
         wifiRecovery = true
         starting = true
         stopRadio(removeForeground = false, clearDesired = false)
         lastStatus = message
         publish(lastStatus)
-        if (WifiLan.endpoints(this).isEmpty()) scheduleWifiRetry() else attemptWifiRecovery()
+        if (WifiLan.endpoints(this).isEmpty()) scheduleWifiRetry(waitingForNetwork = true) else attemptWifiRecovery()
     }
 
     private fun waitForWifi() {
         if (!wifiRecovery || desiredStation == null) return
-        lastStatus = "Wi-Fi unavailable · waiting…"
+        lastStatus = WIFI_WAITING
         publish(lastStatus)
-        scheduleWifiRetry()
+        scheduleWifiRetry(waitingForNetwork = true)
     }
 
     private fun attemptWifiRecovery() {
@@ -274,17 +297,28 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         startStation(request.alias, request.tuneInId)
     }
 
-    private fun scheduleWifiRetry() {
+    private fun scheduleWifiRetry(waitingForNetwork: Boolean = false) {
         wifiRetry?.cancel(false)
         if (!wifiRecovery || destroyed) return
+        if (!waitingForNetwork && wifiRetryAttempt >= MAX_WIFI_RETRY_ATTEMPTS) {
+            abortWifiRecovery("Wi-Fi reconnect gave up after repeated failures.")
+            return
+        }
+        val delayMs = if (waitingForNetwork) {
+            WIFI_OFFLINE_POLL_MS
+        } else {
+            (WIFI_RETRY_BASE_MS shl wifiRetryAttempt.coerceAtMost(4)).coerceAtMost(WIFI_RETRY_MAX_MS)
+        }
+        if (!waitingForNetwork) wifiRetryAttempt += 1
         wifiRetry = worker.schedule({
             if (!destroyed && wifiRecovery) attemptWifiRecovery()
-        }, WIFI_RETRY_MS, TimeUnit.MILLISECONDS)
+        }, delayMs, TimeUnit.MILLISECONDS)
     }
 
     private fun cancelWifiRecovery() {
         wifiRetry?.cancel(false)
         wifiRetry = null
+        wifiRetryAttempt = 0
         wifiRecovery = false
         wifiRecoveryControls = null
         starting = false
@@ -316,7 +350,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     override fun onStreamClosed(source: Any) = execute {
         if (destroyed || !running || source !== proxy) return@execute
         if (shouldRecoverFromWifiChange()) {
-            beginWifiRecovery("Wi-Fi changed · reconnecting radio…")
+            beginWifiRecovery(WIFI_RECONNECTING)
             return@execute
         }
         val alias = station?.alias ?: "Radio"
@@ -328,7 +362,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     override fun onProxyError(source: Any, message: String) = execute {
         if (destroyed || !running || source !== proxy) return@execute
         if (shouldRecoverFromWifiChange()) {
-            beginWifiRecovery("Wi-Fi changed · reconnecting radio…")
+            beginWifiRecovery(WIFI_RECONNECTING)
             return@execute
         }
         lastStatus = "Radio error: $message"
@@ -430,19 +464,31 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         if (removeForeground) stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
-    private fun fail(message: String) {
-        if (wifiRecovery && desiredStation != null) {
+    private fun fail(message: String, retryable: Boolean = false) {
+        if (wifiRecovery && desiredStation != null && retryable) {
             lastStatus = "Wi-Fi reconnect failed: $message"
             stopRadio(removeForeground = false, clearDesired = false)
             publish(lastStatus)
             scheduleWifiRetry()
             return
         }
+        if (wifiRecovery) cancelWifiRecovery()
         lastStatus = message
         publish(message)
         stopRadio()
         stopSelf()
     }
+
+    private fun abortWifiRecovery(message: String) {
+        cancelWifiRecovery()
+        lastStatus = message
+        publish(message)
+        stopRadio()
+        stopSelf()
+    }
+
+    private fun requestForStation(value: MobileRadioStation): StationRequest =
+        StationRequest(value.alias, value.tuneInId.takeIf { value.urls.isEmpty() })
 
     private fun execute(action: () -> Unit) {
         if (destroyed) return
@@ -540,7 +586,13 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         private const val SAFE_START_VOLUME = 3
         private const val RENDERER_STOP_TIMEOUT_MS = 2_500L
         private const val TEARDOWN_TIMEOUT_MS = 1_500L
-        private const val WIFI_RETRY_MS = 2_500L
+        private const val WIFI_FALLBACK_MS = 5_000L
+        private const val WIFI_OFFLINE_POLL_MS = 5_000L
+        private const val WIFI_RETRY_BASE_MS = 2_500L
+        private const val WIFI_RETRY_MAX_MS = 60_000L
+        private const val MAX_WIFI_RETRY_ATTEMPTS = 6
+        private const val WIFI_RECONNECTING = "Wi-Fi changed · reconnecting radio…"
+        private const val WIFI_WAITING = "Wi-Fi unavailable · waiting…"
         private const val WORKER_THREAD_NAME = "wam-mobile-radio"
 
         @Volatile var starting = false

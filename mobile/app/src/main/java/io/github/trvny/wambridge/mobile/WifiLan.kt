@@ -8,6 +8,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetSocketAddress
@@ -73,7 +74,7 @@ internal object WifiLan {
             target.network.bindSocket(socket)
             socket.connect(InetSocketAddress(host, port), timeoutMs)
             return socket
-        } catch (error: Exception) {
+        } catch (error: IOException) {
             runCatching { socket.close() }
             throw error
         }
@@ -84,7 +85,7 @@ internal object WifiLan {
         for (target in targets(context)) {
             try {
                 return connectSocket(target, host, port, timeoutMs)
-            } catch (error: Exception) {
+            } catch (error: IOException) {
                 lastError = error
             }
         }
