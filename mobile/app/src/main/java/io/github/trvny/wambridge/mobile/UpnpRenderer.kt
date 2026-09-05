@@ -66,6 +66,8 @@ internal class UpnpRenderer(
 
     lateinit var localAddress: Inet4Address
         private set
+    var networkHandle: Long = 0
+        private set
     var port: Int = 0
         private set
 
@@ -75,8 +77,10 @@ internal class UpnpRenderer(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            localAddress = WifiLan.targets(context).firstOrNull()?.address
+            val target = WifiLan.targets(context).firstOrNull()
                 ?: error("No active Wi-Fi IPv4 address found")
+            localAddress = target.address
+            networkHandle = target.network.networkHandle
             startHttp()
             startSsdp()
         } catch (error: Exception) {

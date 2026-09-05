@@ -33,6 +33,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
     private val channelLock = Any()
     private val idleLock = Any()
     private var idleRelease: ScheduledFuture<*>? = null
+    private var wifiWatcher: AutoCloseable? = null
     private val startPending = AtomicBoolean(false)
     private val desiredRunning = AtomicBoolean(false)
     private val commandGeneration = AtomicInteger(0)
@@ -50,6 +51,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrNull()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,6 +95,8 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         startPending.set(false)
         setPhase(Phase.STOPPING)
         cancelIdleRelease()
+        runCatching { wifiWatcher?.close() }
+        wifiWatcher = null
 
         try {
             worker.submit { stopRenderer() }.get(DESTROY_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -117,7 +121,7 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
                 if (shouldKeepStarting(generation)) startRenderer(generation, startId)
             } finally {
                 startPending.set(false)
-                if (desiredRunning.get() && !running && !destroyed) {
+                if (desiredRunning.get() && !running && !destroyed && WifiLan.addresses(this).isNotEmpty()) {
                     enqueueStart()
                 } else if (!desiredRunning.get() && !running) {
                     stopSelfResult(startId)
@@ -138,6 +142,11 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
         val target = SpeakerTarget.resolve(applicationContext) { shouldKeepStarting(generation) }
         if (!shouldKeepStarting(generation)) return
         if (target == null) {
+            if (WifiLan.addresses(this).isEmpty()) {
+                lastStatus = "Waiting for Wi-Fi…"
+                publish(lastStatus)
+                return
+            }
             lastStatus = "No WAM speaker found on Wi-Fi."
             publish(lastStatus)
             failCurrentStart(generation, startId)
@@ -190,6 +199,51 @@ class RendererService : Service(), RendererCallbacks, SamsungWamChannel.Listener
                 // Best effort while abandoning a partially started renderer.
             }
         }
+    }
+
+    private fun onWifiChanged() {
+        if (destroyed || !desiredRunning.get()) return
+        try {
+            worker.execute {
+                if (!destroyed && desiredRunning.get()) reconcileWifiEndpoint()
+            }
+        } catch (_: RejectedExecutionException) {
+            // Service teardown won the race.
+        }
+    }
+
+    private fun reconcileWifiEndpoint() {
+        val endpoints = WifiLan.endpoints(this)
+        val activeRenderer = renderer
+        val bound = activeRenderer?.localAddress?.hostAddress?.let {
+            WifiLan.Endpoint(activeRenderer.networkHandle, it)
+        }
+        when (WifiLan.endpointChange(bound, endpoints)) {
+            WifiLan.EndpointChange.STABLE -> return
+            WifiLan.EndpointChange.UNBOUND -> {
+                if (endpoints.isEmpty() || phase != Phase.STARTING) return
+                lastStatus = "Wi-Fi ready · rebuilding renderer…"
+                publish(lastStatus)
+                enqueueStart()
+            }
+            WifiLan.EndpointChange.LOST -> waitForWifi()
+            WifiLan.EndpointChange.MOVED -> rebuildForWifiChange()
+        }
+    }
+
+    private fun waitForWifi() {
+        stopRenderer(removeForeground = false, updatePhase = false)
+        lastStatus = "Wi-Fi unavailable · waiting…"
+        setPhase(Phase.STARTING)
+        publish(lastStatus)
+    }
+
+    private fun rebuildForWifiChange() {
+        stopRenderer(removeForeground = false, updatePhase = false)
+        lastStatus = "Wi-Fi changed · rebuilding renderer…"
+        setPhase(Phase.STARTING)
+        publish(lastStatus)
+        enqueueStart()
     }
 
     private fun shouldKeepStarting(generation: Int): Boolean =

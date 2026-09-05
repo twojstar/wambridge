@@ -45,6 +45,8 @@ internal class RadioProxyServer(
 
     lateinit var localAddress: Inet4Address
         private set
+    var networkHandle: Long = 0
+        private set
     var port: Int = 0
         private set
 
@@ -54,8 +56,10 @@ internal class RadioProxyServer(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            localAddress = WifiLan.targets(appContext).firstOrNull()?.address
+            val target = WifiLan.targets(appContext).firstOrNull()
                 ?: error("No active Wi-Fi IPv4 address found")
+            localAddress = target.address
+            networkHandle = target.network.networkHandle
             val socket = ServerSocket(0, 8, localAddress)
             server = socket
             port = socket.localPort

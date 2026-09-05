@@ -28,6 +28,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     private var targetVolume = SAFE_START_VOLUME
     private var muted = false
     private var speakerIp = ""
+    private var wifiWatcher: AutoCloseable? = null
 
     @Volatile
     private var destroyed = false
@@ -35,6 +36,7 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        wifiWatcher = runCatching { WifiLan.watch(this, ::onWifiChanged) }.getOrNull()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,6 +104,8 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
         destroyed = true
         startPending.set(false)
         starting = false
+        runCatching { wifiWatcher?.close() }
+        wifiWatcher = null
         try {
             worker.submit { stopRadio() }.get(TEARDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: Exception) {
@@ -198,6 +202,36 @@ class RadioService : Service(), RadioProxyServer.Listener, SamsungWamChannel.Lis
             Thread.sleep(50)
         }
         check(!RendererService.busy) { "Renderer did not release the WAM control channel" }
+    }
+
+    private fun onWifiChanged() = execute { reconcileWifiEndpoint() }
+
+    private fun reconcileWifiEndpoint() {
+        if (!running) return
+        val activeProxy = proxy ?: return
+        val endpoints = WifiLan.endpoints(this)
+        val bound = WifiLan.Endpoint(activeProxy.networkHandle, activeProxy.localAddress.hostAddress.orEmpty())
+        when (WifiLan.endpointChange(bound, endpoints)) {
+            WifiLan.EndpointChange.STABLE,
+            WifiLan.EndpointChange.UNBOUND,
+            -> return
+            WifiLan.EndpointChange.LOST -> stopForWifiLoss()
+            WifiLan.EndpointChange.MOVED -> restartForWifiChange()
+        }
+    }
+
+    private fun stopForWifiLoss() {
+        lastStatus = "Wi-Fi unavailable · radio stopped"
+        publish(lastStatus)
+        stopRadio()
+        stopSelf()
+    }
+
+    private fun restartForWifiChange() {
+        val selected = station ?: return
+        lastStatus = "Wi-Fi changed · reconnecting ${selected.alias}…"
+        publish(lastStatus)
+        startStation(selected.alias, selected.tuneInId)
     }
 
     override fun onStreamOpened(sourceUrl: String) = execute {

@@ -3,7 +3,11 @@ package io.github.trvny.wambridge.mobile
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.LinkProperties
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Handler
+import android.os.Looper
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetSocketAddress
@@ -11,6 +15,9 @@ import java.net.Socket
 import java.net.URL
 
 internal object WifiLan {
+    enum class EndpointChange { UNBOUND, STABLE, MOVED, LOST }
+    data class Endpoint(val networkHandle: Long, val address: String)
+
     data class Target(
         val network: Network,
         val address: Inet4Address,
@@ -38,6 +45,22 @@ internal object WifiLan {
         return result
     }
 
+    fun endpoints(context: Context): Set<Endpoint> = targets(context).mapNotNull { target ->
+        target.address.hostAddress?.let { Endpoint(target.network.networkHandle, it) }
+    }.toSet()
+
+    fun addresses(context: Context): Set<String> = endpoints(context).mapTo(mutableSetOf()) { it.address }
+
+    internal fun endpointChange(bound: Endpoint?, available: Set<Endpoint>): EndpointChange = when {
+        bound == null -> EndpointChange.UNBOUND
+        bound in available -> EndpointChange.STABLE
+        available.isEmpty() -> EndpointChange.LOST
+        else -> EndpointChange.MOVED
+    }
+
+    fun watch(context: Context, onChanged: () -> Unit): AutoCloseable =
+        WifiChangeWatcher(context.applicationContext, onChanged)
+
     fun connectSocket(context: Context, host: String, port: Int, timeoutMs: Int): Socket {
         var lastError: Exception? = null
         for (target in targets(context)) {
@@ -59,5 +82,47 @@ internal object WifiLan {
             val connection = target.network.openConnection(url) as HttpURLConnection
             yield(connection)
         }
+    }
+}
+
+
+private class WifiChangeWatcher(
+    context: Context,
+    private val onChanged: () -> Unit,
+) : AutoCloseable {
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    private val handler = Handler(Looper.getMainLooper())
+    @Volatile private var closed = false
+    private val notifyChange = Runnable { if (!closed) onChanged() }
+
+    private val callback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = schedule()
+        override fun onLost(network: Network) = schedule()
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = schedule()
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) = schedule()
+    }
+
+    init {
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        connectivity.registerNetworkCallback(request, callback)
+    }
+
+    private fun schedule() {
+        if (closed) return
+        handler.removeCallbacks(notifyChange)
+        handler.postDelayed(notifyChange, DEBOUNCE_MS)
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        handler.removeCallbacks(notifyChange)
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+    }
+
+    companion object {
+        private const val DEBOUNCE_MS = 900L
     }
 }
