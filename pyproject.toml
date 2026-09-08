@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.0.5"
 description = "Local Wi-Fi audio bridge for Samsung Wireless Audio Multiroom speakers"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "ISC" }
+license = "ISC"
 authors = [{ name = "trvny" }]
 dependencies = []
 
