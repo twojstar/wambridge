@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       tag: ${{ steps.parse.outputs.tag }}
       name: ${{ steps.parse.outputs.name }}
@@ -106,7 +106,7 @@ jobs:
 
   publish:
     needs: [version, component, apk]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       contents: write
     steps:
