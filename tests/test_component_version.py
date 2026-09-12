@@ -1,10 +1,8 @@
-"""Keep the foobar component's declared version equal to the project's.
+"""Keep every shipped version mirror equal to the project version.
 
-The number lives in `version` in pyproject.toml and nowhere else. This test
-exists because it had escaped to four places at once: pyproject said 0.1.0, the
-Android fallback 0.1.3, the newest tag v0.1.4-alpha, and the component itself
-0.1.7 - and the component was the one nobody noticed, because an audit that
-greps .toml, .kts, .md and .yml does not look in .cpp.
+`version` in pyproject.toml is canonical. Runtime/package surfaces still need
+small mirrored literals, so this test guards the Python package, Android fallback
+and foobar component against drifting independently again.
 """
 
 import re
@@ -13,6 +11,8 @@ from unittest import TestCase
 
 ROOT = Path(__file__).parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
+PYTHON_PACKAGE = ROOT / "src" / "wambridge" / "__init__.py"
+ANDROID_BUILD = ROOT / "mobile" / "app" / "build.gradle.kts"
 COMPONENT = ROOT / "foobar" / "foo_out_wam.cpp"
 
 
@@ -30,6 +30,24 @@ def declaration() -> list[str]:
     return re.findall('"([^"]*)"', block)
 
 
+def python_package_version() -> str:
+    source = PYTHON_PACKAGE.read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
+    if match is None:
+        raise AssertionError("wambridge.__version__ is missing")
+    return match.group(1)
+
+
+def android_fallback_version() -> str:
+    source = ANDROID_BUILD.read_text(encoding="utf-8")
+    start = source.index("val wamVersionName")
+    block = source[start : source.index("val wamVersionCode", start)]
+    match = re.search(r'\?:\s*"([^"]+)"', block)
+    if match is None:
+        raise AssertionError("Android wamVersionName fallback is missing")
+    return match.group(1)
+
+
 class ComponentVersionTests(TestCase):
     def test_component_version_matches_the_project(self) -> None:
         name, version, *about = declaration()
@@ -39,6 +57,12 @@ class ComponentVersionTests(TestCase):
             project_version(),
             "the component version drifted from pyproject.toml again",
         )
+
+    def test_python_package_version_matches_the_project(self) -> None:
+        self.assertEqual(python_package_version(), project_version())
+
+    def test_android_fallback_version_matches_the_project(self) -> None:
+        self.assertEqual(android_fallback_version(), project_version())
 
     def test_the_about_box_says_where_this_came_from(self) -> None:
         # Asked for directly: the repository is not discoverable from a DLL
