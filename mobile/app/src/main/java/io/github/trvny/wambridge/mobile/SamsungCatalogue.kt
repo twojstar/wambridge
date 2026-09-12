@@ -3,10 +3,12 @@ package io.github.trvny.wambridge.mobile
 import android.content.Context
 import java.io.IOException
 import java.io.StringReader
+import java.io.StringWriter
 import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.parsers.ParserConfigurationException
 import org.w3c.dom.Element
 import org.w3c.dom.Text
+import org.xml.sax.EntityResolver
 import org.xml.sax.InputSource
 
 /**
@@ -344,27 +346,21 @@ internal object SamsungCatalogue {
 
     private fun parseXml(body: String, what: String): Element {
         val factory = DocumentBuilderFactory.newInstance().apply {
-            // Local speaker XML, but it costs one call to make an entity
-            // declaration in it inert rather than a file read.
-            //
-            // Each feature is set on its own and a refusal is tolerated, because
-            // **Android's parser does not implement them**. The desktop JVM does,
-            // so `setFeature` outside a try passed every unit test here and then
-            // threw `ParserConfigurationException` on the phone, where its message
-            // - the bare feature URI - became the screen's error text. Measured on
-            // the M5 test device 2026-08-28. `isExpandEntityReferences` is a
-            // property rather than a feature and never throws, so the entity
-            // protection that matters survives either way.
-            harden("http://apache.org/xml/features/disallow-doctype-decl")
+            // Fail closed: untrusted network XML must not allow any DOCTYPE.
+            // If this parser cannot enforce it, refuse to parse.
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
             harden("http://xml.org/sax/features/external-general-entities", false)
             harden("http://xml.org/sax/features/external-parameter-entities", false)
             isExpandEntityReferences = false
             isNamespaceAware = false
         }
         return try {
-            factory.newDocumentBuilder()
-                .parse(InputSource(StringReader(body)))
-                .documentElement
+            val builder = factory.newDocumentBuilder().apply {
+                entityResolver = EntityResolver { _, _ ->
+                    throw IOException("External entities are not allowed in $what XML")
+                }
+            }
+            builder.parse(InputSource(StringReader(body))).documentElement
         } catch (error: Exception) {
             throw IOException("Samsung WAM returned invalid $what XML: ${body.take(200)}", error)
         }
